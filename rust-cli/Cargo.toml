@@ -1,0 +1,15 @@
+[package]
+name = "drumbot"
+version = "0.1.0"
+authors = ["Felix Stegmaier <stegmaier.felix@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+env_logger = "0.6.1"
+serde = { version = "1.0.92", features = ["derive"] }
+serde_json = "1.0.39"
+failure = "0.1.5"
+hound = "3.4.0"
+cpal = "0.9.0"
+reqwest = "0.9.18"
+rayon = "1.1.0"

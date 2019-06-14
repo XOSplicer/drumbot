@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::ops::Deref;
 use std::thread;
 use std::time::Duration;
+use std::iter;
 
 #[derive(Fail, Debug)]
 enum AudioError {
@@ -73,21 +74,19 @@ pub fn run() -> Result<(), Error> {
         event_loop.run(move |_, data| {
             match data {
                 // format has been determined beforehand, so using the samples with the correct type
-                cpal::StreamData::Output { buffer: cpal::UnknownTypeOutputBuffer::U16(mut buffer) } =>
-                    unreachable!(),
                 cpal::StreamData::Output { buffer: cpal::UnknownTypeOutputBuffer::I16(mut buffer) } => {
                     for output_sample in buffer.chunks_mut(format.channels as usize) {
-                        let mut input_samples = reader.samples::<i16>();
+                        let mut input_samples = reader.samples::<i16>().map(|s| s.unwrap()).chain(iter::repeat(0));
                         for out in output_sample.iter_mut() {
-                            *out = input_samples.next().expect("No Sample").unwrap(); // samples are interleaved
+                            *out = input_samples.next().unwrap() // samples are interleaved
                         }
                     }
                 },
                 cpal::StreamData::Output { buffer: cpal::UnknownTypeOutputBuffer::F32(mut buffer) } => {
                     for output_sample in buffer.chunks_mut(format.channels as usize) {
-                        let mut input_samples = reader.samples::<f32>();
+                        let mut input_samples = reader.samples::<f32>().map(|s| s.unwrap()).chain(iter::repeat(0.0));
                         for out in output_sample.iter_mut() {
-                            *out = input_samples.next().expect("No Sample").unwrap(); // samples are interleaved
+                            *out = input_samples.next().unwrap(); // samples are interleaved
                         }
                     }
                 },

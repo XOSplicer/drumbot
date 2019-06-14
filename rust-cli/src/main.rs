@@ -1,16 +1,23 @@
-use failure::Error;
-use std::thread;
 mod api;
 mod audio;
 
+use api::Pattern;
+use env_logger;
+use failure::Error;
+use std::{
+    thread,
+    collections::HashMap
+};
 
 fn main() -> Result<(), Error> {
+    std::env::set_var("RUST_LOG", "info");
+    env_logger::try_init()?;
     let base_url = &"https://api.noopschallenge.com/drumbot";
-    let patterns = api::fetch_all(base_url)?;
+    let patterns: HashMap<String, Pattern> = api::fetch_all(base_url)?
+        .into_iter()
+        .map(|p| (p.name().to_owned(), p))
+        .collect();
     println!("{:#?}", &patterns);
-    let t = thread::spawn(move || {
-        audio::run();
-    });
-    t.join().expect("Could not join thread");
+    audio::run()?;
     Ok(())
 }

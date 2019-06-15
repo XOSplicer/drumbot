@@ -1,7 +1,7 @@
 use cpal;
 use failure::{Error, Fail};
 use hound::WavReader;
-use std::{io, thread, sync::{Arc, Mutex}, path::Path, fs, time::Duration};
+use std::{io, thread, sync::{Arc, Mutex}, path::Path, fs};
 
 #[derive(Fail, Debug)]
 enum AudioError {

@@ -12,7 +12,7 @@ enum AudioError {
     #[fail(display = "WAV sample format not supported by output device")]
     OutputNotSupported,
     #[fail(display = "WAV sample format must be the same for all samples")]
-    FormatMismatch,
+    FormatMismatch(cpal::Format, cpal::Format),
 }
 
 fn format_supported(supported: &cpal::SupportedFormat, actual: &cpal::Format) -> bool {
@@ -44,25 +44,35 @@ fn find_supported_format(device: &cpal::Device, format: &cpal::Format)
         .ok_or(AudioError::OutputNotSupported)?)
 }
 
-trait Sample: hound::Sample + Copy {
+trait Sample: hound::Sample + Copy + std::ops::Div<Output = Self> + From<i16> {
     fn zero() -> Self;
-    fn saturating_add_sample(self, other: Self) -> Self;
+    fn clipping_add(self, other: Self) -> Self;
+    fn is_clipping(self) -> bool;
+    fn scale_for(self, i: usize) -> Self {
+        self / From::from(i as i16)
+    }
 }
 
 impl Sample for f32 {
     fn zero() -> Self { 0.0 }
-    fn saturating_add_sample(self, other: Self) -> Self {
+    fn clipping_add(self, other: Self) -> Self {
         let r = self + other;
         if r < -1.0 { return -1.0; }
         if r > 1.0 { return 1.0; }
         return r;
     }
+    fn is_clipping(self) -> bool {
+        self >= 1.0 || self <= -1.0
+    }
 }
 
 impl Sample for i16 {
     fn zero() -> Self { 0 }
-    fn saturating_add_sample(self, other: Self) -> Self {
+    fn clipping_add(self, other: Self) -> Self {
         self.saturating_add(other)
+    }
+    fn is_clipping(self) -> bool {
+        self == i16::min_value() || self == i16::max_value()
     }
 }
 
@@ -92,9 +102,9 @@ impl<R: io::Read> MultiSampler<R> {
     }
     fn add_reader(&mut self, reader: WavReader<R>) -> Result<(), Error> {
         let format = try_spec_to_format(&reader.spec())?;
-        println!("Trying to add reader with format {:#?}", &format);
+        // println!("Trying to add reader with format {:#?}", &format);
         if self.common_format != format {
-            Err(AudioError::FormatMismatch)?;
+            Err(AudioError::FormatMismatch(self.common_format.clone(), format))?;
         }
         let sampler = Sampler(reader);
         self.samplers.push(Some(sampler));
@@ -102,17 +112,21 @@ impl<R: io::Read> MultiSampler<R> {
     }
     fn sample<S: Sample>(&mut self) -> S {
         let mut sum = S::zero();
+        let len = self.samplers.len();
         for sampler in self.samplers.iter_mut() {
             if sampler.is_none() {
                 continue;
             }
             if let Some(s) = sampler.as_mut().unwrap().sample::<S>() {
-                sum = sum.saturating_add_sample(s)
+                sum = sum.clipping_add(s.scale_for(len))
             } else {
                 *sampler = None;
             }
         }
         self.samplers.retain(|s| s.is_some());
+        if sum.is_clipping() {
+            print!("!");
+        }
         sum
     }
     fn active_samplers(&self) -> usize {
@@ -121,6 +135,10 @@ impl<R: io::Read> MultiSampler<R> {
 }
 
 pub fn run() -> Result<AudioEngine, Error> {
+
+    // FIXME: is there a better method of initialiting?
+    // --> pass reference file to creation
+
     let reader = WavReader::open("res/samples/kick.wav")?;
 
     let input_format = reader.spec();
@@ -141,7 +159,6 @@ pub fn run() -> Result<AudioEngine, Error> {
     let sampler = MultiSampler::new(output_format);
     let shared_sampler_1 = Arc::new(Mutex::new(sampler));
     let shared_sampler_2 = shared_sampler_1.clone();
-    let shared_sampler_3 = shared_sampler_1.clone();
 
     let t1 = thread::spawn(move || {
         event_loop.run(move |_, data| {
@@ -164,44 +181,9 @@ pub fn run() -> Result<AudioEngine, Error> {
         });
     });
 
-    let t2 = thread::spawn(move || {
-        loop {
-            // FIXME: unwrap
-            {
-                let mut lock = shared_sampler_2.lock().unwrap();
-                lock.add_reader(WavReader::open("res/samples/kick.wav").unwrap()).unwrap();
-                println!("Active samplers: {}", lock.active_samplers());
-            }
-            thread::sleep(Duration::from_millis(250));
-            {
-                let mut lock = shared_sampler_2.lock().unwrap();
-                lock.add_reader(WavReader::open("res/samples/kick.wav").unwrap()).unwrap();
-                println!("Active samplers: {}", lock.active_samplers());
-            }
-            thread::sleep(Duration::from_millis(250));
-            {
-                let mut lock = shared_sampler_2.lock().unwrap();
-                lock.add_reader(WavReader::open("res/samples/kick.wav").unwrap()).unwrap();
-                println!("Active samplers: {}", lock.active_samplers());
-            }
-            thread::sleep(Duration::from_millis(250));
-            {
-                let mut lock = shared_sampler_2.lock().unwrap();
-                lock.add_reader(WavReader::open("res/samples/kick.wav").unwrap()).unwrap();
-                println!("Active samplers: {}", lock.active_samplers());
-            }
-            {
-                let mut lock = shared_sampler_2.lock().unwrap();
-                lock.add_reader(WavReader::open("res/samples/cowbell.wav").unwrap()).unwrap();
-                println!("Active samplers: {}", lock.active_samplers());
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
-    });
-
     Ok(AudioEngine {
         event_loop_thread: t1,
-        shared_sampler: shared_sampler_3,
+        shared_sampler: shared_sampler_2,
     })
 }
 
@@ -210,14 +192,18 @@ pub struct AudioEngine {
     shared_sampler: Arc<Mutex<MultiSampler<io::BufReader<fs::File>>>>
 }
 
+// TODO: implement split() to take AudioEngine apart
+
 impl AudioEngine {
     pub fn join(self) -> thread::Result<()> {
         // this actually never returns
         self.event_loop_thread.join()
     }
     pub fn dispatch_wav<P: AsRef<Path>>(&mut self, path: P) -> Result<(), Error> {
-        // TODO: implement
-        unimplemented!()
+        let mut lock = self.shared_sampler.lock().unwrap();
+        lock.add_reader(WavReader::open(path)?)?;
+        println!("Active samplers: {}", lock.active_samplers());
+        Ok(())
     }
 }
 

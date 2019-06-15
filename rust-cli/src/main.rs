@@ -18,6 +18,7 @@ fn main() -> Result<(), Error> {
         .map(|p| (p.name().to_owned(), p))
         .collect();
     println!("{:#?}", &patterns);
-    audio::run()?;
+    let engine = audio::run()?;
+    engine.join().unwrap();
     Ok(())
 }

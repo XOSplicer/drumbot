@@ -1,7 +1,7 @@
 use cpal;
 use failure::{Error, Fail};
 use hound::WavReader;
-use std::{io, thread, sync::{Arc, Mutex}, time::Duration};
+use std::{io, thread, sync::{Arc, Mutex}, path::Path, fs, time::Duration};
 
 #[derive(Fail, Debug)]
 enum AudioError {
@@ -78,7 +78,7 @@ impl<R: io::Read> Sampler<R> {
 }
 
 struct MultiSampler<R: io::Read> {
-    samplers: Vec<Sampler<R>>,
+    samplers: Vec<Option<Sampler<R>>>,
     common_format: cpal::Format,
 }
 
@@ -97,22 +97,30 @@ impl<R: io::Read> MultiSampler<R> {
             Err(AudioError::FormatMismatch)?;
         }
         let sampler = Sampler(reader);
-        self.samplers.push(sampler);
+        self.samplers.push(Some(sampler));
         Ok(())
     }
     fn sample<S: Sample>(&mut self) -> S {
         let mut sum = S::zero();
         for sampler in self.samplers.iter_mut() {
-            if let Some(s) = sampler.sample::<S>() {
-                sum = sum.saturating_add_sample(s)
+            if sampler.is_none() {
+                continue;
             }
-            // FIXME: remove sampler from vec otherwise, as its done now
+            if let Some(s) = sampler.as_mut().unwrap().sample::<S>() {
+                sum = sum.saturating_add_sample(s)
+            } else {
+                *sampler = None;
+            }
         }
+        self.samplers.retain(|s| s.is_some());
         sum
+    }
+    fn active_samplers(&self) -> usize {
+        self.samplers.len()
     }
 }
 
-pub fn run() -> Result<(), Error> {
+pub fn run() -> Result<AudioEngine, Error> {
     let reader = WavReader::open("res/samples/kick.wav")?;
 
     let input_format = reader.spec();
@@ -133,6 +141,7 @@ pub fn run() -> Result<(), Error> {
     let sampler = MultiSampler::new(output_format);
     let shared_sampler_1 = Arc::new(Mutex::new(sampler));
     let shared_sampler_2 = shared_sampler_1.clone();
+    let shared_sampler_3 = shared_sampler_1.clone();
 
     let t1 = thread::spawn(move || {
         event_loop.run(move |_, data| {
@@ -157,24 +166,58 @@ pub fn run() -> Result<(), Error> {
 
     let t2 = thread::spawn(move || {
         loop {
-            shared_sampler_2.lock().unwrap()
-                .add_reader(WavReader::open("res/samples/kick.wav").unwrap()).unwrap();
+            // FIXME: unwrap
+            {
+                let mut lock = shared_sampler_2.lock().unwrap();
+                lock.add_reader(WavReader::open("res/samples/kick.wav").unwrap()).unwrap();
+                println!("Active samplers: {}", lock.active_samplers());
+            }
             thread::sleep(Duration::from_millis(250));
-            shared_sampler_2.lock().unwrap()
-                .add_reader(WavReader::open("res/samples/kick.wav").unwrap()).unwrap();
+            {
+                let mut lock = shared_sampler_2.lock().unwrap();
+                lock.add_reader(WavReader::open("res/samples/kick.wav").unwrap()).unwrap();
+                println!("Active samplers: {}", lock.active_samplers());
+            }
             thread::sleep(Duration::from_millis(250));
-            shared_sampler_2.lock().unwrap()
-                .add_reader(WavReader::open("res/samples/kick.wav").unwrap()).unwrap();
+            {
+                let mut lock = shared_sampler_2.lock().unwrap();
+                lock.add_reader(WavReader::open("res/samples/kick.wav").unwrap()).unwrap();
+                println!("Active samplers: {}", lock.active_samplers());
+            }
             thread::sleep(Duration::from_millis(250));
-            shared_sampler_2.lock().unwrap()
-                .add_reader(WavReader::open("res/samples/kick.wav").unwrap()).unwrap();
-            shared_sampler_2.lock().unwrap()
-                .add_reader(WavReader::open("res/samples/cowbell.wav").unwrap()).unwrap();
+            {
+                let mut lock = shared_sampler_2.lock().unwrap();
+                lock.add_reader(WavReader::open("res/samples/kick.wav").unwrap()).unwrap();
+                println!("Active samplers: {}", lock.active_samplers());
+            }
+            {
+                let mut lock = shared_sampler_2.lock().unwrap();
+                lock.add_reader(WavReader::open("res/samples/cowbell.wav").unwrap()).unwrap();
+                println!("Active samplers: {}", lock.active_samplers());
+            }
             thread::sleep(Duration::from_millis(250));
         }
     });
 
-    t1.join().unwrap();
-    t2.join().unwrap();
-    Ok(())
+    Ok(AudioEngine {
+        event_loop_thread: t1,
+        shared_sampler: shared_sampler_3,
+    })
 }
+
+pub struct AudioEngine {
+    event_loop_thread: thread::JoinHandle<()>,
+    shared_sampler: Arc<Mutex<MultiSampler<io::BufReader<fs::File>>>>
+}
+
+impl AudioEngine {
+    pub fn join(self) -> thread::Result<()> {
+        // this actually never returns
+        self.event_loop_thread.join()
+    }
+    pub fn dispatch_wav<P: AsRef<Path>>(&mut self, path: P) -> Result<(), Error> {
+        // TODO: implement
+        unimplemented!()
+    }
+}
+
